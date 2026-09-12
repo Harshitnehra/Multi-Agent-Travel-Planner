@@ -1,5 +1,5 @@
-import os 
-import re 
+import os
+import re
 import certifi
 import airportsdata
 import pycountry
@@ -13,15 +13,16 @@ os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 
 API_KEY = os.getenv("AVIATIONSTACK_API_KEY")
 
-# Default origin when user says only destination, e.g. "Japan trip"
-# Change this if your default location is not Bangladesh/Dhaka.
-DEFAULT_ORIGIN_IATA = os.getenv("DEFAULT_ORIGIN_IATA", "DAC")
-
-
 BASE_URL = "https://api.aviationstack.com/v1/flights"
 
 
 AIRPORTS = airportsdata.load("IATA")
+
+
+def get_default_origin_iata() -> str:
+    """Return a valid airport IATA code, falling back to Delhi."""
+    configured = os.getenv("DEFAULT_ORIGIN_IATA", "DEL").strip().upper()
+    return configured if configured in AIRPORTS else "DEL"
 
 
 
@@ -293,31 +294,34 @@ def find_location_mentions(query: str):
     """
 
     q = query.lower()
-    mentions = []
+    candidates = []
 
     # Country aliases
     for alias in COUNTRY_ALIASES:
-        if re.search(rf"\b{re.escape(alias)}\b", q):
-            mentions.append(alias)
+        for match in re.finditer(rf"\b{re.escape(alias)}\b", q):
+            candidates.append((match.start(), match.end(), alias))
 
     # Country names from pycountry
     for country in pycountry.countries:
         name = country.name.lower()
-        if len(name) >= 4 and re.search(rf"\b{re.escape(name)}\b", q):
-            mentions.append(name)
+        if len(name) >= 4:
+            for match in re.finditer(rf"\b{re.escape(name)}\b", q):
+                candidates.append((match.start(), match.end(), name))
 
     # City names from our preferred city map
     for city in CITY_MAIN_AIRPORT:
-        if re.search(rf"\b{re.escape(city)}\b", q):
-            mentions.append(city)
+        for match in re.finditer(rf"\b{re.escape(city)}\b", q):
+            candidates.append((match.start(), match.end(), city))
 
-    # Remove duplicate while keeping order
-    unique_mentions = []
-    for item in mentions:
-        if item not in unique_mentions:
-            unique_mentions.append(item)
+    # Preserve query order and prefer the longest name when matches overlap.
+    candidates.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+    selected = []
+    for start, end, name in candidates:
+        if any(start < chosen_end and end > chosen_start for chosen_start, chosen_end, _ in selected):
+            continue
+        selected.append((start, end, name))
 
-    return unique_mentions
+    return [name for _, _, name in selected]
 
 
 def parse_route(query: str):
@@ -388,21 +392,29 @@ def parse_route(query: str):
 
         return dep_iata, arr_iata
 
-    # Pattern: flights from X
-    match = re.search(r"\bfrom\s+(.+?)(?:[.!?]|$)", q_lower)
+    # Destination-before-origin wording: "Japan trip from Bangladesh".
+    match = re.search(r"\bfrom\s+", q_lower)
 
     if match:
-        origin_text = match.group(1)
-        dep_iata = resolve_location_to_iata(origin_text)
-        return dep_iata, None
+        origin_mentions = find_location_mentions(q_lower[match.end():])
+        destination_mentions = find_location_mentions(q_lower[:match.start()])
+
+        if origin_mentions:
+            dep_iata = resolve_location_to_iata(origin_mentions[0])
+            arr_iata = (
+                resolve_location_to_iata(destination_mentions[-1])
+                if destination_mentions
+                else None
+            )
+            return dep_iata, arr_iata
 
     # Pattern: flights to X
-    match = re.search(r"\bto\s+(.+?)(?:[.!?]|$)", q_lower)
+    match = re.search(r"\bto\s+", q_lower)
 
     if match:
-        dest_text = match.group(1)
-        arr_iata = resolve_location_to_iata(dest_text)
-        return None, arr_iata
+        destination_mentions = find_location_mentions(q_lower[match.end():])
+        if destination_mentions:
+            return None, resolve_location_to_iata(destination_mentions[0])
 
     # Fallback: find country/city mentions
     mentions = find_location_mentions(q)
@@ -414,7 +426,7 @@ def parse_route(query: str):
 
     if len(mentions) == 1:
         arr_iata = resolve_location_to_iata(mentions[0])
-        return DEFAULT_ORIGIN_IATA, arr_iata
+        return get_default_origin_iata(), arr_iata
 
     return None, None
 
