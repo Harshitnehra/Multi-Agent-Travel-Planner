@@ -235,6 +235,79 @@ textarea::placeholder {
     padding: 28px;
 }
 
+.approval-panel {
+    display: grid;
+    gap: 16px;
+    margin-bottom: 22px;
+    padding: 20px;
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    border-radius: 18px;
+    background: rgba(120, 53, 15, 0.18);
+}
+
+.approval-panel.hidden {
+    display: none;
+}
+
+.approval-panel h3 {
+    margin: 6px 0;
+    font-size: 1.15rem;
+}
+
+.approval-panel p {
+    color: #cbd5e1;
+    line-height: 1.5;
+}
+
+.review-label {
+    color: #fbbf24;
+    font-size: 0.78rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.revision-feedback {
+    min-height: 92px;
+    border-radius: 14px;
+    padding: 14px;
+}
+
+.approval-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+.approval-actions button {
+    border: 1px solid transparent;
+    border-radius: 11px;
+    padding: 10px 15px;
+    color: #ffffff;
+    cursor: pointer;
+    font-weight: 750;
+}
+
+.approval-actions button:disabled {
+    cursor: wait;
+    opacity: 0.6;
+}
+
+.reject-btn {
+    border-color: rgba(248, 113, 113, 0.45) !important;
+    background: rgba(127, 29, 29, 0.45);
+}
+
+.revise-btn {
+    border-color: rgba(251, 191, 36, 0.45) !important;
+    background: rgba(146, 64, 14, 0.6);
+}
+
+.approve-btn {
+    background: #15803d;
+}
+
 .result-actions {
     display: flex;
     gap: 10px;

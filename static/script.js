@@ -1,183 +1,178 @@
-let currentThreadId = localStorage.getItem("travel_thread_id") || null;
+let currentThreadId = null;
 let latestAnswerMarkdown = "";
 
+const byId = (id) => document.getElementById(id);
+
 function setPrompt(text) {
-    document.getElementById("userInput").value = text;
+    byId("userInput").value = text;
+    byId("userInput").focus();
 }
 
-function setLoading(isLoading) {
-    const sendBtn = document.getElementById("sendBtn");
-    const btnText = document.getElementById("btnText");
-    const btnLoader = document.getElementById("btnLoader");
+function setBusy(isBusy, label = "Working...") {
+    const sendButton = byId("sendBtn");
+    sendButton.disabled = isBusy;
+    byId("btnText").classList.toggle("hidden", isBusy);
+    byId("btnLoader").classList.toggle("hidden", !isBusy);
 
-    sendBtn.disabled = isLoading;
+    document.querySelectorAll(".approval-actions button").forEach((button) => {
+        button.disabled = isBusy;
+    });
 
-    if (isLoading) {
-        btnText.classList.add("hidden");
-        btnLoader.classList.remove("hidden");
+    if (isBusy) {
+        sendButton.setAttribute("aria-label", label);
     } else {
-        btnText.classList.remove("hidden");
-        btnLoader.classList.add("hidden");
+        sendButton.removeAttribute("aria-label");
     }
 }
 
 function showError(message) {
-    const errorBox = document.getElementById("errorBox");
-
+    const errorBox = byId("errorBox");
     errorBox.textContent = message;
     errorBox.classList.remove("hidden");
 }
 
 function hideError() {
-    const errorBox = document.getElementById("errorBox");
-
-    errorBox.classList.add("hidden");
-    errorBox.textContent = "";
+    byId("errorBox").classList.add("hidden");
+    byId("errorBox").textContent = "";
 }
 
-function showResult(answer, threadId) {
-    latestAnswerMarkdown = answer;
-
-    const resultSection = document.getElementById("resultSection");
-    const resultBox = document.getElementById("resultBox");
-    const threadInfo = document.getElementById("threadInfo");
-
+function renderMarkdown(markdown) {
+    const resultBox = byId("resultBox");
     if (typeof marked !== "undefined" && typeof DOMPurify !== "undefined") {
-        resultBox.innerHTML = DOMPurify.sanitize(marked.parse(answer));
-    } else {
-        resultBox.innerText = answer;
+        resultBox.innerHTML = DOMPurify.sanitize(marked.parse(markdown));
+        return;
+    }
+    resultBox.textContent = markdown;
+}
+
+function renderWorkflowResult(data) {
+    currentThreadId = data.thread_id;
+    latestAnswerMarkdown = data.answer || data.itinerary || "";
+    localStorage.setItem("travel_thread_id", currentThreadId);
+
+    renderMarkdown(latestAnswerMarkdown);
+    byId("threadInfo").textContent = `Plan reference: ${currentThreadId}`;
+
+    const awaitingReview = data.status === "approval_required";
+    byId("approvalPanel").classList.toggle("hidden", !awaitingReview);
+    byId("resultTitle").textContent = awaitingReview ? "Draft travel plan" : "Approved travel plan";
+
+    if (!awaitingReview) {
+        byId("revisionFeedback").value = "";
     }
 
-    threadInfo.textContent = `Thread ID: ${threadId}`;
+    byId("resultSection").classList.remove("hidden");
+    byId("resultSection").scrollIntoView({behavior: "smooth", block: "start"});
+}
 
-    resultSection.classList.remove("hidden");
-
-    resultSection.scrollIntoView({
-        behavior: "smooth",
-        block: "start"
+async function requestJson(url, payload) {
+    const response = await fetch(url, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
     });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+        throw new Error(data.error || "The request could not be completed.");
+    }
+    return data;
 }
 
 async function sendMessage() {
     hideError();
-
-    const input = document.getElementById("userInput");
-    const message = input.value.trim();
-
+    const message = byId("userInput").value.trim();
     if (!message) {
-        showError("Please enter your travel request first.");
+        showError("Enter a travel request first.");
         return;
     }
 
-    setLoading(true);
+    setBusy(true, "Generating draft");
+    byId("approvalPanel").classList.add("hidden");
 
     try {
-        const response = await fetch("/api/travel", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                message: message,
-                thread_id: currentThreadId
-            })
-        });
-
-        const data = await response.json();
-
-        if (!response.ok || !data.success) {
-            throw new Error(data.error || "Something went wrong.");
-        }
-
-        currentThreadId = data.thread_id;
-        localStorage.setItem("travel_thread_id", currentThreadId);
-
-        showResult(data.answer, data.thread_id);
-
+        const data = await requestJson("/api/travel", {message, thread_id: null});
+        renderWorkflowResult(data);
     } catch (error) {
         showError(error.message);
     } finally {
-        setLoading(false);
+        setBusy(false);
     }
 }
 
-function copyResult() {
-    const resultBox = document.getElementById("resultBox");
-    const text = resultBox.innerText;
-
-    if (!text) {
+async function submitApproval(action) {
+    hideError();
+    if (!currentThreadId) {
+        showError("This draft has no plan reference. Generate a new plan.");
         return;
     }
 
-    navigator.clipboard.writeText(text)
-        .then(() => {
-            const copyBtn = document.querySelector(".copy-btn");
-            const oldText = copyBtn.textContent;
+    const feedback = byId("revisionFeedback").value.trim();
+    if (action === "revise" && !feedback) {
+        showError("Describe what you want changed before requesting a revision.");
+        byId("revisionFeedback").focus();
+        return;
+    }
 
-            copyBtn.textContent = "Copied!";
-
-            setTimeout(() => {
-                copyBtn.textContent = oldText;
-            }, 1400);
-        })
-        .catch(() => {
-            showError("Could not copy result.");
+    setBusy(true, action === "revise" ? "Revising draft" : "Applying review");
+    try {
+        const data = await requestJson("/api/travel/approval", {
+            thread_id: currentThreadId,
+            action,
+            feedback
         });
+        renderWorkflowResult(data);
+    } catch (error) {
+        showError(error.message);
+    } finally {
+        setBusy(false);
+    }
+}
+
+async function copyResult() {
+    const text = byId("resultBox").innerText;
+    if (!text) return;
+
+    try {
+        await navigator.clipboard.writeText(text);
+        const button = document.querySelector(".copy-btn");
+        const previous = button.textContent;
+        button.textContent = "Copied";
+        setTimeout(() => { button.textContent = previous; }, 1400);
+    } catch {
+        showError("The plan could not be copied.");
+    }
 }
 
 function downloadPDF() {
-    const pdfContent = document.getElementById("pdfContent");
-
+    const pdfContent = byId("pdfContent");
     if (!latestAnswerMarkdown || !pdfContent) {
-        showError("No travel plan available to download.");
+        showError("There is no travel plan to download.");
         return;
     }
 
-    const downloadBtn = document.querySelector(".download-btn");
-    const oldText = downloadBtn.textContent;
-
-    downloadBtn.textContent = "Preparing PDF...";
-    downloadBtn.disabled = true;
-
-    const options = {
-        margin: 0.5,
-        filename: "ai-travel-plan.pdf",
-        image: {
-            type: "jpeg",
-            quality: 0.98
-        },
-        html2canvas: {
-            scale: 2,
-            useCORS: true,
-            backgroundColor: "#ffffff"
-        },
-        jsPDF: {
-            unit: "in",
-            format: "a4",
-            orientation: "portrait"
-        },
-        pagebreak: {
-            mode: ["avoid-all", "css", "legacy"]
-        }
-    };
+    const button = document.querySelector(".download-btn");
+    const previous = button.textContent;
+    button.textContent = "Preparing...";
+    button.disabled = true;
 
     html2pdf()
-        .set(options)
+        .set({
+            margin: 0.5,
+            filename: "tripmate-travel-plan.pdf",
+            image: {type: "jpeg", quality: 0.98},
+            html2canvas: {scale: 2, useCORS: true, backgroundColor: "#ffffff"},
+            jsPDF: {unit: "in", format: "a4", orientation: "portrait"},
+            pagebreak: {mode: ["avoid-all", "css", "legacy"]}
+        })
         .from(pdfContent)
         .save()
-        .then(() => {
-            downloadBtn.textContent = oldText;
-            downloadBtn.disabled = false;
-        })
-        .catch(() => {
-            downloadBtn.textContent = oldText;
-            downloadBtn.disabled = false;
-            showError("Could not download PDF.");
+        .catch(() => showError("The PDF could not be generated."))
+        .finally(() => {
+            button.textContent = previous;
+            button.disabled = false;
         });
 }
 
-document.addEventListener("keydown", function(event) {
-    if (event.ctrlKey && event.key === "Enter") {
-        sendMessage();
-    }
+document.addEventListener("keydown", (event) => {
+    if (event.ctrlKey && event.key === "Enter") sendMessage();
 });

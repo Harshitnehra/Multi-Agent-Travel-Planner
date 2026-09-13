@@ -22,15 +22,15 @@
 
         <section class="hero-section">
             <div class="badge">
-                ✈️ TripMate AI — A Multi-Agent Travel Planner with LangGraph
+                harshit.nehra travel planning
             </div>
 
             <h1>
-                Plan Your Perfect Trip with AI
+                Build a trip you can review before it is final
             </h1>
 
             <p>
-                Search flights, discover hotels, and generate a complete travel itinerary using a multi-agent LangGraph system.
+                A supervisor coordinates live research and itinerary specialists. Nothing is finalized until you approve the draft.
             </p>
         </section>
 
@@ -40,7 +40,7 @@
                 <div>
                     <h2>Where do you want to go?</h2>
                     <p>
-                        Example: Plan a complete 7 days Japan trip from Bangladesh under 2 lakhs.
+                        Include your origin, destination, dates or duration, budget, and preferences.
                     </p>
                 </div>
 
@@ -53,7 +53,7 @@
             <div class="input-area">
                 <textarea
                     id="userInput"
-                    placeholder="Plan a complete 7 days Japan trip including flights, hotels and sightseeing under 2 lakhs..."
+                    placeholder="Plan a 7-day Japan trip from Delhi in October under ₹2 lakh, with quiet hotels and food experiences."
                 ></textarea>
 
                 <button id="sendBtn" onclick="sendMessage()">
@@ -63,20 +63,20 @@
             </div>
 
             <div class="quick-prompts">
-                <button onclick="setPrompt('Plan a complete 7 days Japan trip from Bangladesh including flights, hotels and sightseeing under 2 lakhs.')">
+                <button onclick="setPrompt('Plan a 7-day Japan trip from Delhi under ₹2 lakh, including flights, hotels and local food.')">
                     Japan Trip
                 </button>
 
-                <button onclick="setPrompt('Plan a 5 days Dubai trip from Dhaka with flights, hotels and sightseeing.')">
+                <button onclick="setPrompt('Plan a 5-day Dubai trip from Delhi with flights, hotels and sightseeing.')">
                     Dubai Trip
                 </button>
 
-                <button onclick="setPrompt('Plan a 7 days Thailand trip from Bangladesh with budget hotels and sightseeing.')">
+                <button onclick="setPrompt('Plan a 7-day Thailand trip from Mumbai with budget hotels and sightseeing.')">
                     Thailand Trip
                 </button>
 
-                <button onclick="setPrompt('Give me all country flight info.')">
-                    Global Flights
+                <button onclick="setPrompt('Plan a long weekend in Goa from Delhi with a ₹45,000 budget.')">
+                    Goa Weekend
                 </button>
             </div>
 
@@ -86,7 +86,7 @@
 
             <div class="result-header">
                 <div>
-                    <h2>Your AI Travel Plan</h2>
+                    <h2 id="resultTitle">Travel plan</h2>
                     <p id="threadInfo">Thread ID: -</p>
                 </div>
 
@@ -98,6 +98,26 @@
                     <button class="download-btn" onclick="downloadPDF()">
                         Download PDF
                     </button>
+                </div>
+            </div>
+
+            <div id="approvalPanel" class="approval-panel hidden">
+                <div>
+                    <span class="review-label">Human review required</span>
+                    <h3>Review this draft before finalizing it</h3>
+                    <p>Approve it as written, describe a revision, or reject the plan.</p>
+                </div>
+
+                <textarea
+                    id="revisionFeedback"
+                    class="revision-feedback"
+                    placeholder="For revisions, explain what should change—for example: use fewer hotel changes and lower the food budget."
+                ></textarea>
+
+                <div class="approval-actions">
+                    <button class="reject-btn" onclick="submitApproval('reject')">Reject</button>
+                    <button class="revise-btn" onclick="submitApproval('revise')">Request revision</button>
+                    <button class="approve-btn" onclick="submitApproval('approve')">Approve plan</button>
                 </div>
             </div>
 
@@ -113,7 +133,9 @@
     </main>
 
     <footer>
-        Built with FastAPI, LangGraph, Groq, PostgreSQL, Tavily and AviationStack
+        <p>
+            &copy; 2026 . best of luck.
+        </p>
     </footer>
 
     <!-- Markdown Renderer -->
