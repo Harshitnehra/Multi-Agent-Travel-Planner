@@ -8,7 +8,33 @@ from langgraph.types import Command
 
 os.environ["LANGSMITH_TRACING"] = "false"
 
-from backend import _initial_state, build_graph, truncate_for_prompt
+from backend import (
+    _initial_state,
+    build_graph,
+    strip_structured_plan_section,
+    truncate_for_prompt,
+)
+from domain import ItineraryGeneration, Location, TripPlan
+
+
+def generated_plan(markdown: str, destination: str = "Tokyo") -> dict:
+    parsed = ItineraryGeneration(
+        rendered_itinerary=markdown,
+        trip_plan=TripPlan(
+            title=f"Trip to {destination}",
+            original_request=f"Plan a trip to {destination}",
+            destination=Location(name=destination),
+            missing_information=["Travel dates"],
+        ),
+    )
+    return {"raw": AIMessage(content=markdown), "parsed": parsed, "parsing_error": None}
+
+
+def configure_structured_llm(llm: Mock, *markdown_results: str) -> Mock:
+    structured = Mock()
+    structured.invoke.side_effect = [generated_plan(value) for value in markdown_results]
+    llm.with_structured_output.return_value = structured
+    return structured
 
 
 class SupervisorWorkflowTests(unittest.TestCase):
@@ -21,7 +47,7 @@ class SupervisorWorkflowTests(unittest.TestCase):
     def test_workflow_pauses_for_approval(self, call_tool, get_llm):
         call_tool.side_effect = ["Flight results", "Hotel results", "Weather results"]
         llm = Mock()
-        llm.invoke.return_value = AIMessage(content="Draft itinerary")
+        configure_structured_llm(llm, "Draft itinerary")
         get_llm.return_value = llm
 
         result = self.graph.invoke(
@@ -31,6 +57,11 @@ class SupervisorWorkflowTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "approval_required")
         self.assertEqual(result["draft_itinerary"], "Draft itinerary")
+        self.assertEqual(result["structured_plan"]["destination"]["name"], "Tokyo")
+        self.assertEqual(
+            result["structured_plan"]["original_request"],
+            "Plan a Tokyo trip from Delhi",
+        )
         self.assertEqual(result["llm_calls"], 1)
         self.assertIn("__interrupt__", result)
         self.assertEqual(call_tool.call_count, 3)
@@ -41,7 +72,7 @@ class SupervisorWorkflowTests(unittest.TestCase):
     def test_approved_draft_completes_without_second_llm_call(self, call_tool, get_llm):
         call_tool.side_effect = ["Flight results", "Hotel results", "Weather results"]
         llm = Mock()
-        llm.invoke.return_value = AIMessage(content="Approved draft")
+        structured = configure_structured_llm(llm, "Approved draft")
         get_llm.return_value = llm
         self.graph.invoke(_initial_state("Plan a Tokyo trip from Delhi"), config=self.config)
 
@@ -52,17 +83,14 @@ class SupervisorWorkflowTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["final_answer"], "Approved draft")
-        self.assertEqual(llm.invoke.call_count, 1)
+        self.assertEqual(structured.invoke.call_count, 1)
 
     @patch("backend.get_llm")
     @patch("backend.call_mcp_tool")
     def test_revision_regenerates_and_pauses_again(self, call_tool, get_llm):
         call_tool.side_effect = ["Flight results", "Hotel results", "Weather results"]
         llm = Mock()
-        llm.invoke.side_effect = [
-            AIMessage(content="First draft"),
-            AIMessage(content="Revised draft"),
-        ]
+        structured = configure_structured_llm(llm, "First draft", "Revised draft")
         get_llm.return_value = llm
         self.graph.invoke(_initial_state("Plan a Tokyo trip from Delhi"), config=self.config)
 
@@ -76,8 +104,54 @@ class SupervisorWorkflowTests(unittest.TestCase):
         self.assertEqual(result["revision_count"], 1)
         self.assertIn("__interrupt__", result)
         self.assertEqual(call_tool.call_count, 3)
-        revised_prompt = llm.invoke.call_args.args[0][1].content
+        revised_prompt = structured.invoke.call_args.args[0][1].content
         self.assertIn("Use one hotel", revised_prompt)
+
+    @patch("backend.get_llm")
+    @patch("backend.call_mcp_tool")
+    def test_malformed_structured_output_keeps_readable_draft(self, call_tool, get_llm):
+        call_tool.side_effect = ["Flight results", "Hotel results", "Weather results"]
+        llm = Mock()
+        structured = Mock()
+        structured.invoke.return_value = {
+            "raw": AIMessage(content="Readable fallback itinerary"),
+            "parsed": None,
+            "parsing_error": ValueError("invalid structure"),
+        }
+        llm.with_structured_output.return_value = structured
+        get_llm.return_value = llm
+
+        result = self.graph.invoke(
+            _initial_state("Plan a Tokyo trip from Delhi"), config=self.config
+        )
+
+        self.assertEqual(result["draft_itinerary"], "Readable fallback itinerary")
+        self.assertEqual(result["structured_plan"]["title"], "Travel plan")
+        self.assertIn("Travel dates", result["structured_plan"]["missing_information"])
+        llm.invoke.assert_not_called()
+
+    @patch("backend.get_llm")
+    @patch("backend.call_mcp_tool")
+    def test_provider_failure_returns_saved_fallback_instead_of_500(
+        self, call_tool, get_llm
+    ):
+        call_tool.side_effect = RuntimeError("provider unavailable")
+        llm = Mock()
+        structured = Mock()
+        structured.invoke.side_effect = RuntimeError("structured provider unavailable")
+        llm.with_structured_output.return_value = structured
+        llm.invoke.side_effect = RuntimeError("readable provider unavailable")
+        get_llm.return_value = llm
+
+        result = self.graph.invoke(
+            _initial_state("Plan a 5-day Dubai trip from Delhi"), config=self.config
+        )
+
+        self.assertEqual(result["status"], "approval_required")
+        self.assertIn("temporarily unavailable", result["draft_itinerary"])
+        self.assertEqual(result["structured_plan"]["origin"]["name"], "Delhi")
+        self.assertEqual(result["structured_plan"]["destination"]["name"], "Dubai")
+        self.assertIn("__interrupt__", result)
 
     @patch("backend.call_mcp_tool")
     def test_guardrail_rejection_skips_external_tools(self, call_tool):
@@ -93,6 +167,32 @@ class SupervisorWorkflowTests(unittest.TestCase):
         result = truncate_for_prompt("word " * 5_000, 1_000)
         self.assertLessEqual(len(result), 1_040)
         self.assertIn("source data omitted", result)
+
+    def test_structured_json_section_is_not_shown_in_readable_itinerary(self):
+        headings = [
+            "## Structured trip plan (JSON-style)",
+            "**Structured trip plan (machine-readable)**",
+            "Structured trip plan (machine readable)",
+        ]
+        for heading in headings:
+            with self.subTest(heading=heading):
+                content = (
+                    "# Dubai itinerary\n\nReadable plan.\n\n---\n\n"
+                    f"{heading}\n\n"
+                    "```json\n{\"destination\": \"Dubai\"}\n```"
+                )
+                self.assertEqual(
+                    strip_structured_plan_section(content),
+                    "# Dubai itinerary\n\nReadable plan.",
+                )
+
+    def test_internal_schema_words_are_humanized(self):
+        content = "| Flight | source_verified | Gate |\n| AI171 | true | null |"
+        cleaned = strip_structured_plan_section(content)
+        self.assertNotIn("source_verified", cleaned)
+        self.assertNotIn("null", cleaned)
+        self.assertIn("Source checked", cleaned)
+        self.assertIn("To be confirmed", cleaned)
 
 
 if __name__ == "__main__":

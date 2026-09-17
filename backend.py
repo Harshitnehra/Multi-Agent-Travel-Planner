@@ -1,13 +1,11 @@
 import logging
 import operator
-import os
+import re
 import uuid
 from functools import lru_cache
 from typing import Annotated, Literal, TypedDict
 
-import certifi
 import psycopg
-from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langgraph.checkpoint.memory import InMemorySaver
@@ -16,13 +14,12 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from psycopg.rows import dict_row
 
+from config import configure_transport_security, get_settings
+from domain import ItineraryGeneration, fallback_trip_plan
 from guardrails import validate_travel_request
 from mcp_client import call_mcp_tool
 
-load_dotenv()
-
-os.environ["SSL_CERT_FILE"] = certifi.where()
-os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+configure_transport_security()
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +45,7 @@ class TravelState(TypedDict):
     hotel_results: str
     weather_results: str
     draft_itinerary: str
+    structured_plan: dict
     final_answer: str
     human_feedback: str
     revision_count: int
@@ -56,24 +54,21 @@ class TravelState(TypedDict):
 
 
 def get_database_url() -> str | None:
-    database_url = os.getenv("DATABASE_URL")
-    if not database_url:
-        return None
-    if "sslmode=" not in database_url:
-        separator = "&" if "?" in database_url else "?"
-        return f"{database_url}{separator}sslmode=require"
-    return database_url
+    return get_settings().postgres_checkpoint_url()
 
 
 @lru_cache(maxsize=1)
 def get_llm() -> ChatGroq:
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
+    settings = get_settings()
+    if not settings.groq_api_key:
         raise ValueError("GROQ_API_KEY is missing. Add it to your .env file.")
     return ChatGroq(
-        model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
-        api_key=api_key,
-        max_tokens=2_500,
+        model=settings.groq_model,
+        api_key=settings.groq_api_key,
+        # The response contains both the rendered itinerary and the complete
+        # structured TripPlan. 2,500 tokens truncated valid tool-call JSON for
+        # detailed five-day plans and surfaced as an HTTP 500.
+        max_tokens=6_000,
     )
 
 
@@ -83,6 +78,30 @@ def truncate_for_prompt(value: object, max_chars: int) -> str:
         return text
     shortened = text[:max_chars].rsplit(" ", 1)[0]
     return shortened + "\n[Additional source data omitted]"
+
+
+def strip_structured_plan_section(markdown: str) -> str:
+    """Return human-facing prose without schema dumps or internal labels."""
+    original = markdown or ""
+    marker = re.search(
+        r"(?im)^\s{0,3}(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*"
+        r"structured\s+trip\s+plan\b.*$",
+        original,
+    )
+    readable = original[: marker.start()] if marker else original
+    readable = re.sub(r"(?is)```\s*json\s*.*?```", "", readable)
+    readable = re.sub(r"(?im)\bsource_verified\b", "Source checked", readable)
+    readable = re.sub(r"(?im)\bnull\b", "To be confirmed", readable)
+    readable = re.sub(r"(?i)\|\s*true\s*\|", "| Yes |", readable)
+    readable = re.sub(r"(?i)\|\s*false\s*\|", "| No |", readable)
+    readable = re.sub(
+        r"(?im)^\s*\*\*(trip summary|flights|hotels|day-by-day itinerary|"
+        r"budget|practical notes)\*\*\s*$",
+        lambda match: f"## {match.group(1)}",
+        readable,
+    )
+    readable = re.sub(r"\n\s*(?:---|\*\*\*|___)\s*$", "", readable).rstrip()
+    return readable or "# Travel plan\n\nA readable itinerary is not available yet."
 
 
 def input_guardrail(state: TravelState) -> dict:
@@ -214,20 +233,33 @@ Use these sections exactly:
 Write plainly and specifically. Separate verified live data from estimates. Do
 not invent prices, availability, booking confirmations, or source links. State
 important assumptions in one short list. Keep the plan under 1,200 words.
+
+Populate both fields required by the response tool schema. In the trip_plan field,
+use null for unknown dates, times, flight numbers, prices, addresses, coordinates,
+and timezones. A research result is not a booking: keep every suggested flight and
+hotel status as "suggested". Set source_verified only when the supplied research
+directly supports that exact field. Add every detail required for future booking
+or monitoring to missing_information.
+
+The rendered_itinerary field must contain only the six readable sections above.
+Never include JSON, a JSON code fence, internal schema fields, or a section named
+"Structured trip plan" in rendered_itinerary. Put all machine-readable data only
+in the trip_plan field. In the readable itinerary, write "To be confirmed" instead
+of null, and never show internal names such as source_verified or missing_information.
 """
-    response = get_llm().invoke(
-        [
-            SystemMessage(
-                content=(
-                    "You are a precise travel planner. Produce useful professional prose, "
-                    "not promotional copy."
-                )
-            ),
-            HumanMessage(content=prompt),
-        ]
-    )
+    messages = [
+        SystemMessage(
+            content=(
+                "You are a precise travel planner. Produce useful professional prose, "
+                "not promotional copy. Never fabricate booking or monitoring data."
+            )
+        ),
+        HumanMessage(content=prompt),
+    ]
+    generation = _generate_structured_itinerary(messages, state["user_query"])
     return {
-        "draft_itinerary": response.content,
+        "draft_itinerary": generation.rendered_itinerary,
+        "structured_plan": generation.trip_plan.model_dump(mode="json"),
         "completed_agents": _mark_complete(state, "itinerary"),
         "human_feedback": "",
         "status": "approval_required",
@@ -236,12 +268,112 @@ important assumptions in one short list. Keep the plan under 1,200 words.
     }
 
 
+def _message_text(message: object) -> str:
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts).strip()
+    return str(content or "").strip()
+
+
+def _generate_structured_itinerary(
+    messages: list[AnyMessage], original_request: str
+) -> ItineraryGeneration:
+    """Generate one validated plan, preserving readable output on parse failure."""
+    llm = get_llm()
+    try:
+        result = llm.with_structured_output(
+            ItineraryGeneration,
+            method="function_calling",
+            include_raw=True,
+        ).invoke(messages)
+        if isinstance(result, ItineraryGeneration):
+            return result.model_copy(
+                update={
+                    "rendered_itinerary": strip_structured_plan_section(
+                        result.rendered_itinerary
+                    ),
+                    "trip_plan": result.trip_plan.model_copy(
+                        update={"original_request": original_request}
+                    )
+                }
+            )
+
+        if isinstance(result, dict):
+            parsed = result.get("parsed")
+            if parsed is not None:
+                generation = (
+                    parsed
+                    if isinstance(parsed, ItineraryGeneration)
+                    else ItineraryGeneration.model_validate(parsed)
+                )
+                return generation.model_copy(
+                    update={
+                        "rendered_itinerary": strip_structured_plan_section(
+                            generation.rendered_itinerary
+                        ),
+                        "trip_plan": generation.trip_plan.model_copy(
+                            update={"original_request": original_request}
+                        )
+                    }
+                )
+
+            raw_text = _message_text(result.get("raw"))
+            if raw_text:
+                logger.warning("Structured itinerary parsing failed; using safe fallback.")
+                return ItineraryGeneration(
+                    rendered_itinerary=strip_structured_plan_section(raw_text),
+                    trip_plan=fallback_trip_plan(original_request),
+                )
+    except Exception as exc:
+        logger.warning("Structured itinerary generation failed: %s", exc)
+
+    try:
+        response = llm.invoke(messages)
+        readable = _message_text(response)
+    except Exception as exc:
+        logger.warning("Readable itinerary fallback failed: %s", exc)
+        readable = ""
+    if not readable:
+        plan = fallback_trip_plan(original_request)
+        origin = plan.origin.name if plan.origin else "your origin"
+        destination = plan.destination.name if plan.destination else "your destination"
+        readable = (
+            "# Travel plan draft\n\n"
+            f"TripMate saved your request for a trip from **{origin}** to "
+            f"**{destination}**, but the AI planning provider is temporarily "
+            "unavailable.\n\n"
+            "## What is saved\n\n"
+            f"- Request: {original_request}\n"
+            "- Booking status: no flight or hotel has been booked\n"
+            "- Payment status: no payment has been created\n\n"
+            "## Details still required\n\n"
+            "- Exact travel dates and traveler count\n"
+            "- Flight and hotel selections\n"
+            "- Sightseeing preferences and budget\n\n"
+            "Request a revision when the provider is available to generate the "
+            "complete researched itinerary."
+        )
+    return ItineraryGeneration(
+        rendered_itinerary=strip_structured_plan_section(readable),
+        trip_plan=fallback_trip_plan(original_request),
+    )
+
+
 def approval_gate(state: TravelState) -> dict:
     decision = interrupt(
         {
             "kind": "trip_plan_approval",
             "question": "Approve this itinerary, request a revision, or reject it.",
             "draft": state["draft_itinerary"],
+            "structured_plan": state.get("structured_plan", {}),
             "revision_count": state.get("revision_count", 0),
             "allowed_actions": ["approve", "revise", "reject"],
         }
@@ -341,6 +473,7 @@ def _initial_state(user_input: str) -> TravelState:
         "hotel_results": "",
         "weather_results": "",
         "draft_itinerary": "",
+        "structured_plan": {},
         "final_answer": "",
         "human_feedback": "",
         "revision_count": 0,
@@ -370,6 +503,7 @@ def _public_result(result: dict, thread_id: str) -> dict:
         "hotel_results": result.get("hotel_results", ""),
         "weather_results": result.get("weather_results", ""),
         "itinerary": result.get("draft_itinerary", ""),
+        "structured_plan": result.get("structured_plan", {}),
         "supervisor_trace": result.get("supervisor_trace", []),
         "revision_count": result.get("revision_count", 0),
         "llm_calls": result.get("llm_calls", 0),

@@ -9,6 +9,8 @@ python-dotenv==1.2.2
 tavily-python==0.7.24
 requests==2.34.2
 langgraph-checkpoint-postgres==3.1.0
+SQLAlchemy==2.0.52
+alembic==1.20.0
 airportsdata==20260315
 pycountry==26.2.16
 fastapi==0.136.3

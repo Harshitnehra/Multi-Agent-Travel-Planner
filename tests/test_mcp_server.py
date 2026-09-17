@@ -9,7 +9,14 @@ class MCPServerTests(unittest.TestCase):
         tools = asyncio.run(mcp.list_tools())
         self.assertEqual(
             {tool.name for tool in tools},
-            {"search_flights", "search_hotels", "resolve_route", "destination_weather"},
+            {
+                "search_flights",
+                "get_flight_status",
+                "search_hotels",
+                "resolve_route",
+                "destination_weather",
+                "weather_for_city",
+            },
         )
 
     def test_capabilities_resource_is_registered(self):

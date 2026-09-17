@@ -6,25 +6,23 @@ from tavily.errors import (
     TimeoutError as TavilyTimeoutError,
     UsageLimitExceededError,
 )
-import os
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
+from config import get_settings
 
 
 def tavily_search(query):
-    api_key = os.getenv("TAVILY_API_KEY")
-    if not api_key:
+    settings = get_settings()
+    if not settings.tavily_api_key:
         return "Hotel search unavailable: TAVILY_API_KEY is not configured."
 
-    client = TavilyClient(api_key=api_key)
+    client = TavilyClient(api_key=settings.tavily_api_key)
 
     try:
         response = client.search(
             query=query,
             max_results=5,
-            timeout=15,
+            timeout=min(settings.request_timeout_seconds, 15),
         )
     except requests.exceptions.ConnectionError:
         return (

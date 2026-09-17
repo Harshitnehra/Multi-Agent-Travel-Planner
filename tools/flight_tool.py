@@ -1,17 +1,11 @@
-import os
 import re
-import certifi
 import airportsdata
 import pycountry
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
+from config import configure_transport_security, get_settings
 
-os.environ["SSL_CERT_FILE"] = certifi.where()
-os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
-
-API_KEY = os.getenv("AVIATIONSTACK_API_KEY")
+configure_transport_security()
 
 BASE_URL = "https://api.aviationstack.com/v1/flights"
 
@@ -21,7 +15,7 @@ AIRPORTS = airportsdata.load("IATA")
 
 def get_default_origin_iata() -> str:
     """Return a valid airport IATA code, falling back to Delhi."""
-    configured = os.getenv("DEFAULT_ORIGIN_IATA", "DEL").strip().upper()
+    configured = get_settings().default_origin_iata
     return configured if configured in AIRPORTS else "DEL"
 
 
@@ -479,7 +473,8 @@ Arrival:
 
 
 def search_flights(query: str, limit: int = 10):
-    if not API_KEY:
+    settings = get_settings()
+    if not settings.aviationstack_api_key:
         return (
             "Flight API error: AVIATIONSTACK_API_KEY is missing.\n"
             "Please add this in your .env file:\n"
@@ -489,7 +484,7 @@ def search_flights(query: str, limit: int = 10):
     dep_iata, arr_iata = parse_route(query)
 
     params = {
-        "access_key": API_KEY,
+        "access_key": settings.aviationstack_api_key,
         "limit": min(limit, 100),
     }
 
@@ -500,7 +495,11 @@ def search_flights(query: str, limit: int = 10):
         params["arr_iata"] = arr_iata
 
     try:
-        response = requests.get(BASE_URL, params=params, timeout=30)
+        response = requests.get(
+            BASE_URL,
+            params=params,
+            timeout=settings.request_timeout_seconds,
+        )
         data = response.json()
     except requests.exceptions.RequestException as e:
         return f"Flight API request failed: {e}"
@@ -545,6 +544,54 @@ def search_flights(query: str, limit: int = 10):
     formatted_flights = [format_flight(flight) for flight in flight_data[:limit]]
 
     return f"{route_info}\n\n" + "\n\n---\n\n".join(formatted_flights)
+
+
+def get_flight_status(flight_number: str, flight_date: str) -> str:
+    """Return status data for one flight number on one ISO date."""
+    settings = get_settings()
+    normalized_number = re.sub(r"\s+", "", flight_number).upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,3}\d{1,4}[A-Z]?", normalized_number):
+        raise ValueError("A valid flight number such as AI171 is required.")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", flight_date):
+        raise ValueError("Flight date must use YYYY-MM-DD format.")
+    if not settings.aviationstack_api_key:
+        raise RuntimeError("Flight status is unavailable because AVIATIONSTACK_API_KEY is not configured.")
+
+    try:
+        response = requests.get(
+            BASE_URL,
+            params={
+                "access_key": settings.aviationstack_api_key,
+                "flight_iata": normalized_number,
+                "limit": 5,
+            },
+            timeout=settings.request_timeout_seconds,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError("The flight-status provider could not be reached.") from None
+    except ValueError as exc:
+        raise RuntimeError("The flight-status provider returned invalid data.") from None
+
+    if data.get("error"):
+        message = data["error"].get("message", "Flight-status request failed.")
+        raise RuntimeError(message)
+    matches = [
+        item for item in (data.get("data") or [])
+        if not item.get("flight_date") or item.get("flight_date") == flight_date
+    ]
+    if not matches:
+        return (
+            f"Flight: {normalized_number}\n"
+            f"Date: {flight_date}\n"
+            "Status: unavailable\n"
+            "Source: AviationStack real-time flight data\n\n"
+            "The provider was reached successfully, but it has no live status "
+            "record for this flight and date. Verify the flight number/date or "
+            "try again closer to departure."
+        )
+    return "\n\n---\n\n".join(format_flight(item) for item in matches)
 
 
 if __name__ == "__main__":

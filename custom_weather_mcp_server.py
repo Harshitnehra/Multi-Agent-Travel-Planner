@@ -1,43 +1,35 @@
-import os
-from pathlib import Path
 from typing import Any
 
 import requests
-from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
+from config import get_settings
 
-BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
 
 mcp = FastMCP("Weather MCP Server")
 
-OPENWEATHER_API_KEY = os.getenv(
-    "OPENWEATHER_API_KEY"
-)
-
-REQUEST_TIMEOUT_SECONDS = 20
-
 
 def _get_api_key() -> str:
-    if not OPENWEATHER_API_KEY:
+    api_key = get_settings().openweather_api_key
+    if not api_key:
         raise RuntimeError(
             "OPENWEATHER_API_KEY is missing "
             "from the project .env file."
         )
 
-    return OPENWEATHER_API_KEY
+    return api_key
 
 
 def _request_json(
     url: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
+    settings = get_settings()
     try:
         response = requests.get(
             url,
             params=params,
-            timeout=REQUEST_TIMEOUT_SECONDS,
+            timeout=settings.request_timeout_seconds,
         )
 
         response.raise_for_status()
@@ -45,24 +37,7 @@ def _request_json(
         return response.json()
 
     except requests.RequestException as exc:
-        details = ""
-
-        failed_response = getattr(
-            exc,
-            "response",
-            None,
-        )
-
-        if failed_response is not None:
-            details = (
-                f" Response: "
-                f"{failed_response.text[:500]}"
-            )
-
-        raise RuntimeError(
-            f"OpenWeather request failed: "
-            f"{exc}.{details}"
-        ) from exc
+        raise RuntimeError("OpenWeather could not be reached or rejected the request.") from None
 
 
 @mcp.tool()

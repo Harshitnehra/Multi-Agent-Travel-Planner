@@ -5,9 +5,9 @@
 
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <title>TripMate AI</title>
+    <title>TripMate — Plan with confidence</title>
 
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v=4">
 </head>
 
 <body>
@@ -20,21 +20,82 @@
 
     <main class="app-container">
 
+        <nav class="topbar" aria-label="Primary navigation">
+            <a class="brand" href="/" aria-label="TripMate home">
+                <span class="brand-mark" aria-hidden="true">T</span>
+                <span>TripMate</span>
+            </a>
+            <span class="topbar-note">AI planning · Human approved</span>
+        </nav>
+
         <section class="hero-section">
-            <div class="badge">
-                harshit.nehra travel planning
-            </div>
+            <div class="badge">Your trip, thoughtfully coordinated</div>
 
             <h1>
-                Build a trip you can review before it is final
+                Go farther. <span>Plan smarter.</span>
             </h1>
 
             <p>
-                A supervisor coordinates live research and itinerary specialists. Nothing is finalized until you approve the draft.
+                Flights, stays, weather, and a day-by-day plan—researched by specialist agents and always reviewed by you.
             </p>
+            <div class="workflow-strip" aria-label="Planning workflow">
+                <span><b>01</b> Tell us your idea</span>
+                <i aria-hidden="true">→</i>
+                <span><b>02</b> Agents research</span>
+                <i aria-hidden="true">→</i>
+                <span><b>03</b> You approve</span>
+            </div>
         </section>
 
-        <section class="planner-card">
+        <section id="authSection" class="auth-card">
+            <div class="auth-intro">
+                <span class="eyebrow">Private travel workspace</span>
+                <h2 id="authTitle">Welcome back</h2>
+                <p id="authHint">Sign in to continue planning and reopen your saved trips.</p>
+                <ul class="auth-benefits" aria-label="Account benefits">
+                    <li>Save every itinerary version</li>
+                    <li>Review before anything is final</li>
+                    <li>Return to your trips at any time</li>
+                </ul>
+            </div>
+            <form id="authForm" class="auth-form" novalidate>
+                <div id="displayNameField" class="field hidden">
+                    <label for="displayName">Full name</label>
+                    <input id="displayName" name="display_name" type="text" maxlength="120" autocomplete="name" placeholder="How should we address you?">
+                </div>
+                <div class="field">
+                    <label for="email">Email address</label>
+                    <input id="email" name="email" type="email" maxlength="320" placeholder="you@example.com" autocomplete="email" required>
+                </div>
+                <div class="field">
+                    <label for="password">Password</label>
+                    <div class="password-wrap">
+                        <input id="password" name="password" type="password" maxlength="200" placeholder="Enter your password" autocomplete="current-password" required>
+                        <button id="passwordToggle" class="password-toggle" type="button" aria-label="Show password" aria-pressed="false">Show</button>
+                    </div>
+                    <small id="passwordHelp" class="field-help hidden">Use at least 10 characters.</small>
+                </div>
+                <p id="authMessage" class="form-message hidden" role="alert" aria-live="polite"></p>
+                <button id="authBtn" class="primary-auth-btn" type="submit">
+                    <span id="authBtnText">Sign in</span>
+                    <span id="authLoader" class="loader hidden" aria-hidden="true"></span>
+                </button>
+                <p class="auth-switch">
+                    <span id="authSwitchPrompt">New to TripMate?</span>
+                    <button id="authModeBtn" class="link-button" type="button">Create an account</button>
+                </p>
+            </form>
+        </section>
+
+        <div id="accountBar" class="account-bar hidden">
+            <div class="account-identity">
+                <span class="avatar" id="accountAvatar" aria-hidden="true">T</span>
+                <span><small>Signed in as</small><strong id="accountName"></strong></span>
+            </div>
+            <button class="secondary-button" onclick="logout()">Sign out</button>
+        </div>
+
+        <section id="plannerSection" class="planner-card hidden">
 
             <div class="card-header">
                 <div>
@@ -82,6 +143,17 @@
 
         </section>
 
+        <section id="savedTripsSection" class="saved-trips hidden">
+            <div class="saved-header">
+                <div>
+                    <h2>My trips</h2>
+                    <p>Open any saved plan and continue where you stopped.</p>
+                </div>
+                <button onclick="loadTrips()">Refresh</button>
+            </div>
+            <div id="savedTripsList" class="trip-list"></div>
+        </section>
+
         <section id="resultSection" class="result-section hidden">
 
             <div class="result-header">
@@ -121,6 +193,50 @@
                 </div>
             </div>
 
+            <div id="tripWorkspace" class="trip-workspace hidden">
+                <div class="workspace-header">
+                    <div>
+                        <span class="review-label">Trip Workspace</span>
+                        <h3>Monitor this approved plan</h3>
+                        <p>Monitoring is manual in this phase. Each check saves a snapshot.</p>
+                    </div>
+                    <span id="workspaceVersion" class="workspace-version"></span>
+                </div>
+                <div class="workspace-actions">
+                    <button id="action-check_flight" onclick="runWorkspaceAction('check_flight')" disabled>
+                        <span>Check flight status</span><small>Checking availability</small>
+                    </button>
+                    <button id="action-check_weather" onclick="runWorkspaceAction('check_weather')" disabled>
+                        <span>Check weather</span><small>Checking availability</small>
+                    </button>
+                </div>
+                <form id="flightDetailsForm" class="flight-details-form hidden">
+                    <div class="flight-status-heading">
+                        <strong>Check real flight status</strong>
+                        <small>Enter the airline flight number and operating date. Data is fetched from AviationStack.</small>
+                    </div>
+                    <label>Flight number
+                        <input id="monitorFlightNumber" aria-label="Flight number" placeholder="e.g. AI171 or AI-171" maxlength="20" autocapitalize="characters" required>
+                    </label>
+                    <label>Flight date
+                        <input id="monitorFlightDate" aria-label="Flight date" type="date" required>
+                    </label>
+                    <button id="saveFlightDetailsBtn" type="submit">Check real status</button>
+                </form>
+                <div id="workspaceNotice" class="workspace-notice" role="status" aria-live="polite"></div>
+                <div id="workspaceOutput" class="workspace-output hidden"></div>
+                <section id="riskDecision" class="risk-decision hidden" aria-live="assertive">
+                    <span class="risk-label">Trip Guardian warning</span>
+                    <h4 id="riskTitle">Trip risk detected</h4>
+                    <ul id="riskReasons"></ul>
+                    <p id="riskPrompt">Would you like to recreate this trip or keep the current plan?</p>
+                    <div class="risk-actions">
+                        <button id="recreateTripBtn" onclick="handleRiskDecision('recreate')">Recreate trip</button>
+                        <button id="skipRiskBtn" class="risk-skip" onclick="handleRiskDecision('skip')">Skip — keep current trip</button>
+                    </div>
+                </section>
+            </div>
+
             <div id="pdfContent" class="pdf-content">
                 <h1 class="pdf-title">AI Travel Plan</h1>
                 <div id="resultBox" class="result-box"></div>
@@ -132,9 +248,11 @@
 
     </main>
 
+    <div id="appToast" class="app-toast hidden" role="status" aria-live="assertive"></div>
+
     <footer>
         <p>
-            &copy; 2026 . best of luck.
+            &copy; 2026 TripMate · Your decisions stay in the loop.
         </p>
     </footer>
 
@@ -144,9 +262,8 @@
 
     <!-- PDF Download Library -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
-
     <!-- Your Custom JS -->
-    <script src="/static/script.js"></script>
+    <script src="/static/script.js?v=4"></script>
 
 </body>
 </html>
