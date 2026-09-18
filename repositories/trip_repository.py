@@ -9,6 +9,47 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from database import Trip, TripMessage, TripVersion
+from itinerary_formatting import strip_structured_plan_section
+
+
+GENERIC_TRIP_TITLES = {
+    "travel plan",
+    "travel plan draft",
+    "trip plan",
+    "trip plan draft",
+}
+
+
+def _clean_history_title(value: object) -> str:
+    """Turn a planning prompt into a short, chat-history style title."""
+    title = " ".join(str(value or "").split()).strip(" .,:;-\n\t")
+    title = title.removeprefix("Please ").removeprefix("please ")
+    for prefix in ("Plan me ", "plan me ", "Plan ", "plan ", "Create ", "create "):
+        if title.startswith(prefix):
+            title = title[len(prefix) :]
+            break
+    for prefix in ("a ", "an ", "my "):
+        if title.lower().startswith(prefix):
+            title = title[len(prefix) :]
+            break
+    if len(title) > 64:
+        title = title[:61].rstrip(" .,:;-") + "..."
+    return title[:1].upper() + title[1:] if title else "New trip"
+
+
+def history_title(plan: dict[str, Any], request_text: str = "") -> str:
+    """Choose a useful saved-trip title without exposing workflow metadata."""
+    proposed = " ".join(str(plan.get("title") or "").split()).strip()
+    if proposed and proposed.casefold() not in GENERIC_TRIP_TITLES:
+        return _clean_history_title(proposed)
+
+    destination = plan.get("destination") or {}
+    if isinstance(destination, dict):
+        place = destination.get("city") or destination.get("name")
+        if place:
+            return _clean_history_title(f"{place} trip")
+
+    return _clean_history_title(request_text or plan.get("original_request"))
 
 
 def _date(value: object) -> date | None:
@@ -42,7 +83,7 @@ class TripRepository:
         trip = Trip(
             user_id=user_id,
             planning_thread_id=result["thread_id"],
-            title=plan.get("title") or "Travel plan",
+            title=history_title(plan, request_text),
             status=workflow_status(result.get("status", "")),
             start_date=_date(plan.get("start_date")),
             end_date=_date(plan.get("end_date")),
@@ -141,7 +182,10 @@ class TripRepository:
             )
         trip.status = workflow_status(result.get("status", ""))
         if plan:
-            trip.title = plan.get("title") or trip.title
+            trip.title = history_title(
+                plan,
+                str(plan.get("original_request") or trip.title),
+            )
             trip.start_date = _date(plan.get("start_date"))
             trip.end_date = _date(plan.get("end_date"))
             trip.timezone = plan.get("timezone")
@@ -150,10 +194,14 @@ class TripRepository:
 
 def trip_summary(trip: Trip) -> dict[str, Any]:
     latest = max(trip.versions, key=lambda item: item.version_number)
+    title = history_title(
+        latest.structured_plan or {},
+        str((latest.structured_plan or {}).get("original_request") or trip.title),
+    )
     return {
         "id": trip.id,
         "thread_id": trip.planning_thread_id,
-        "title": trip.title,
+        "title": title,
         "status": trip.status,
         "start_date": trip.start_date.isoformat() if trip.start_date else None,
         "end_date": trip.end_date.isoformat() if trip.end_date else None,
@@ -161,7 +209,7 @@ def trip_summary(trip: Trip) -> dict[str, Any]:
         "current_version": trip.current_version,
         "guardian_enabled": trip.guardian_enabled,
         "updated_at": trip.updated_at.isoformat(),
-        "itinerary": latest.rendered_itinerary,
+        "itinerary": strip_structured_plan_section(latest.rendered_itinerary),
         "structured_plan": latest.structured_plan,
     }
 
@@ -171,7 +219,7 @@ def trip_detail(trip: Trip) -> dict[str, Any]:
     payload["versions"] = [
         {
             "version": version.version_number,
-            "itinerary": version.rendered_itinerary,
+            "itinerary": strip_structured_plan_section(version.rendered_itinerary),
             "structured_plan": version.structured_plan,
             "change_reason": version.change_reason,
             "created_by": version.created_by,

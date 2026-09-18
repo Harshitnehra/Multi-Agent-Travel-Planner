@@ -7,7 +7,7 @@
 
     <title>TripMate — Plan with confidence</title>
 
-    <link rel="stylesheet" href="/static/style.css?v=4">
+    <link rel="stylesheet" href="/static/style.css?v=7">
 </head>
 
 <body>
@@ -141,13 +141,24 @@
                 </button>
             </div>
 
+            <section id="generationProgress" class="generation-progress hidden" aria-live="polite" aria-label="Trip generation progress">
+                <div class="generation-progress-header">
+                    <span class="generation-spark" aria-hidden="true">✦</span>
+                    <div>
+                        <strong id="generationTitle">Creating your trip</strong>
+                        <p id="generationStatus">Understanding your request…</p>
+                    </div>
+                </div>
+                <ol id="generationSteps" class="generation-steps"></ol>
+            </section>
+
         </section>
 
         <section id="savedTripsSection" class="saved-trips hidden">
             <div class="saved-header">
                 <div>
-                    <h2>My trips</h2>
-                    <p>Open any saved plan and continue where you stopped.</p>
+                    <h2>Trip history</h2>
+                    <p>Your trips are saved automatically. Open one to continue where you stopped.</p>
                 </div>
                 <button onclick="loadTrips()">Refresh</button>
             </div>
@@ -263,7 +274,7 @@
     <!-- PDF Download Library -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <!-- Your Custom JS -->
-    <script src="/static/script.js?v=4"></script>
+    <script src="/static/script.js?v=7"></script>
 
 </body>
 </html>

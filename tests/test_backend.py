@@ -168,6 +168,31 @@ class SupervisorWorkflowTests(unittest.TestCase):
         self.assertLessEqual(len(result), 1_040)
         self.assertIn("source data omitted", result)
 
+    @patch("backend.get_llm")
+    @patch("backend.call_mcp_tool")
+    def test_itinerary_prompt_requires_complete_tables_and_lists(self, call_tool, get_llm):
+        call_tool.side_effect = ["Flight results", "Hotel results", "Weather results"]
+        llm = Mock()
+        structured = configure_structured_llm(llm, "Complete draft")
+        get_llm.return_value = llm
+
+        self.graph.invoke(
+            _initial_state("Plan a Tokyo trip from Delhi"), config=self.config
+        )
+
+        prompt = structured.invoke.call_args.args[0][1].content
+        for section in (
+            "Best places to visit",
+            "Activities and experiences",
+            "Best time to visit",
+            "Local food",
+            "Budget and total cost",
+            "Recommendations and practical notes",
+        ):
+            self.assertIn(section, prompt)
+        self.assertIn("Markdown table", prompt)
+        self.assertIn("grand total", prompt)
+
     def test_structured_json_section_is_not_shown_in_readable_itinerary(self):
         headings = [
             "## Structured trip plan (JSON-style)",
@@ -193,6 +218,36 @@ class SupervisorWorkflowTests(unittest.TestCase):
         self.assertNotIn("null", cleaned)
         self.assertIn("Source checked", cleaned)
         self.assertIn("To be confirmed", cleaned)
+
+    def test_json_wrapper_displays_only_the_readable_itinerary(self):
+        content = (
+            '{"trip_plan":{"title":"Goa trip"},'
+            '"rendered_itinerary":"1. Trip summary\\n\\nA relaxed break.\\n\\n'
+            '2. Flights\\n\\n- Delhi to Goa"}'
+        )
+        cleaned = strip_structured_plan_section(content)
+        self.assertEqual(
+            cleaned,
+            "## Trip Summary\n\nA relaxed break.\n\n## Flights\n\n- Delhi to Goa",
+        )
+        self.assertNotIn("trip_plan", cleaned)
+
+    def test_readable_itinerary_is_recovered_from_damaged_outer_json(self):
+        content = (
+            '{"trip_plan":{"start_date":To be confirmed},'
+            '"rendered_itinerary":"## Trip summary\\n\\nReadable plan."}'
+        )
+        self.assertEqual(
+            strip_structured_plan_section(content),
+            "## Trip Summary\n\nReadable plan.",
+        )
+
+    def test_numbered_unicode_headings_and_bullets_are_normalized(self):
+        content = "4. Day‑by‑day itinerary\n\nDay 1 – Arrive\n• Check in"
+        self.assertEqual(
+            strip_structured_plan_section(content),
+            "## Day-By-Day Itinerary\n\n### Day 1 – Arrive\n- Check in",
+        )
 
 
 if __name__ == "__main__":

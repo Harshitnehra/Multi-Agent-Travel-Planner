@@ -1,6 +1,5 @@
 import logging
 import operator
-import re
 import uuid
 from functools import lru_cache
 from typing import Annotated, Literal, TypedDict
@@ -17,6 +16,7 @@ from psycopg.rows import dict_row
 from config import configure_transport_security, get_settings
 from domain import ItineraryGeneration, fallback_trip_plan
 from guardrails import validate_travel_request
+from itinerary_formatting import strip_structured_plan_section
 from mcp_client import call_mcp_tool
 
 configure_transport_security()
@@ -78,30 +78,6 @@ def truncate_for_prompt(value: object, max_chars: int) -> str:
         return text
     shortened = text[:max_chars].rsplit(" ", 1)[0]
     return shortened + "\n[Additional source data omitted]"
-
-
-def strip_structured_plan_section(markdown: str) -> str:
-    """Return human-facing prose without schema dumps or internal labels."""
-    original = markdown or ""
-    marker = re.search(
-        r"(?im)^\s{0,3}(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?\s*"
-        r"structured\s+trip\s+plan\b.*$",
-        original,
-    )
-    readable = original[: marker.start()] if marker else original
-    readable = re.sub(r"(?is)```\s*json\s*.*?```", "", readable)
-    readable = re.sub(r"(?im)\bsource_verified\b", "Source checked", readable)
-    readable = re.sub(r"(?im)\bnull\b", "To be confirmed", readable)
-    readable = re.sub(r"(?i)\|\s*true\s*\|", "| Yes |", readable)
-    readable = re.sub(r"(?i)\|\s*false\s*\|", "| No |", readable)
-    readable = re.sub(
-        r"(?im)^\s*\*\*(trip summary|flights|hotels|day-by-day itinerary|"
-        r"budget|practical notes)\*\*\s*$",
-        lambda match: f"## {match.group(1)}",
-        readable,
-    )
-    readable = re.sub(r"\n\s*(?:---|\*\*\*|___)\s*$", "", readable).rstrip()
-    return readable or "# Travel plan\n\nA readable itinerary is not available yet."
 
 
 def input_guardrail(state: TravelState) -> dict:
@@ -222,17 +198,46 @@ Hotel research:
 Weather research:
 {truncate_for_prompt(state['weather_results'], 1_500)}
 {revision_instruction}
-Use these sections exactly:
+The rendered itinerary must use these sections in this exact order:
 1. Trip summary
 2. Flights
 3. Hotels
-4. Day-by-day itinerary
-5. Budget
-6. Practical notes
+4. Best places to visit
+5. Day-by-day itinerary
+6. Activities and experiences
+7. Best time to visit
+8. Local food
+9. Budget and total cost
+10. Recommendations and practical notes
 
-Write plainly and specifically. Separate verified live data from estimates. Do
-not invent prices, availability, booking confirmations, or source links. State
-important assumptions in one short list. Keep the plan under 1,200 words.
+Use valid Markdown and make the output easy to scan:
+- Trip summary: a short bullet list covering route, duration, travelers, dates,
+  travel style, and budget.
+- Flights: a Markdown table with route, airline/flight, departure, arrival,
+  duration, estimated price, and verification/status columns.
+- Hotels: a Markdown table with hotel, area, stay dates, room, nightly estimate,
+  total estimate, and status columns.
+- Best places to visit: a Markdown table with place, why visit, suggested time,
+  estimated entry cost, and best day/time.
+- Day-by-day itinerary: a Markdown table with day/date, time, plan, location,
+  transport, and estimated cost. Keep each row concise.
+- Activities and experiences: bullets grouped by must-do, optional, family,
+  cultural, nature, or nightlife relevance where applicable.
+- Best time to visit: bullets for best months/season, expected weather, crowds,
+  what to pack, and any seasonal caution.
+- Local food: a Markdown table with dish, description, where/area to try it,
+  dietary note, and estimated price.
+- Budget and total cost: a Markdown table covering flights, hotels, food,
+  local transport, activities, shopping/other, contingency, and a clearly
+  emphasized grand total for the whole trip and per traveler.
+- Recommendations and practical notes: concise bullets for transport, safety,
+  local etiquette, connectivity, payments, booking priorities, assumptions,
+  and details still to confirm.
+
+Include every section even when research is incomplete; use "To be confirmed"
+for missing values. Write plainly and specifically. Separate verified live data
+from estimates. Do not invent prices, availability, booking confirmations, or
+source links. Keep the plan under 1,600 words.
 
 Populate both fields required by the response tool schema. In the trip_plan field,
 use null for unknown dates, times, flight numbers, prices, addresses, coordinates,
@@ -241,7 +246,7 @@ hotel status as "suggested". Set source_verified only when the supplied research
 directly supports that exact field. Add every detail required for future booking
 or monitoring to missing_information.
 
-The rendered_itinerary field must contain only the six readable sections above.
+The rendered_itinerary field must contain only the ten readable sections above.
 Never include JSON, a JSON code fence, internal schema fields, or a section named
 "Structured trip plan" in rendered_itinerary. Put all machine-readable data only
 in the trip_plan field. In the readable itinerary, write "To be confirmed" instead
@@ -345,22 +350,76 @@ def _generate_structured_itinerary(
         plan = fallback_trip_plan(original_request)
         origin = plan.origin.name if plan.origin else "your origin"
         destination = plan.destination.name if plan.destination else "your destination"
-        readable = (
-            "# Travel plan draft\n\n"
-            f"TripMate saved your request for a trip from **{origin}** to "
-            f"**{destination}**, but the AI planning provider is temporarily "
-            "unavailable.\n\n"
-            "## What is saved\n\n"
-            f"- Request: {original_request}\n"
-            "- Booking status: no flight or hotel has been booked\n"
-            "- Payment status: no payment has been created\n\n"
-            "## Details still required\n\n"
-            "- Exact travel dates and traveler count\n"
-            "- Flight and hotel selections\n"
-            "- Sightseeing preferences and budget\n\n"
-            "Request a revision when the provider is available to generate the "
-            "complete researched itinerary."
-        )
+        readable = f"""# Travel plan draft
+
+## Trip summary
+
+- **Route:** {origin} to {destination}
+- **Request:** {original_request}
+- **Dates, duration, travelers and style:** To be confirmed
+- **Planning status:** The AI planning provider is temporarily unavailable; no booking or payment has been created.
+
+## Flights
+
+| Route | Airline / Flight | Departure | Arrival | Duration | Estimated price | Status |
+|---|---|---|---|---|---|---|
+| {origin} → {destination} | To be confirmed | To be confirmed | To be confirmed | To be confirmed | To be confirmed | Not booked |
+
+## Hotels
+
+| Hotel | Area | Stay dates | Room | Nightly estimate | Total estimate | Status |
+|---|---|---|---|---|---|---|
+| To be confirmed | {destination} | To be confirmed | To be confirmed | To be confirmed | To be confirmed | Not booked |
+
+## Best places to visit
+
+| Place | Why visit | Suggested time | Entry estimate | Best day / time |
+|---|---|---|---|---|
+| To be researched | Destination highlights require refreshed provider results | To be confirmed | To be confirmed | To be confirmed |
+
+## Day-by-day itinerary
+
+| Day / Date | Time | Plan | Location | Transport | Estimated cost |
+|---|---|---|---|---|---|
+| To be confirmed | To be confirmed | Complete itinerary requires refreshed provider results | {destination} | To be confirmed | To be confirmed |
+
+## Activities and experiences
+
+- **Must-do:** To be researched
+- **Cultural and local experiences:** To be researched
+- **Optional activities:** To be confirmed
+
+## Best time to visit
+
+- **Best months or season:** To be researched
+- **Weather and crowds:** To be confirmed
+- **Packing and seasonal cautions:** To be confirmed
+
+## Local food
+
+| Dish | Description | Where to try | Dietary note | Estimated price |
+|---|---|---|---|---|
+| To be researched | Local specialties require refreshed provider results | {destination} | To be confirmed | To be confirmed |
+
+## Budget and total cost
+
+| Category | Estimated total |
+|---|---:|
+| Flights | To be confirmed |
+| Hotels | To be confirmed |
+| Food | To be confirmed |
+| Local transport | To be confirmed |
+| Activities | To be confirmed |
+| Shopping / other | To be confirmed |
+| Contingency | To be confirmed |
+| **Grand total** | **To be confirmed** |
+
+## Recommendations and practical notes
+
+- Confirm exact dates, traveler count, budget and preferences.
+- Refresh the plan when the provider is available to research flights, hotels, attractions, weather and local food.
+- Review all estimates before booking; nothing in this draft is booked or paid.
+"""
     return ItineraryGeneration(
         rendered_itinerary=strip_structured_plan_section(readable),
         trip_plan=fallback_trip_plan(original_request),

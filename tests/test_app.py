@@ -90,6 +90,22 @@ class AppTests(unittest.TestCase):
         self.assertIn("Skip — keep current trip", page)
         self.assertIn("handleRiskDecision", script)
 
+    def test_trip_generation_shows_section_progress(self):
+        page = self.client.get("/").text
+        script = self.client.get("/static/script.js").text
+        self.assertIn('id="generationProgress"', page)
+        for stage in (
+            "Researching flight options",
+            "Comparing hotel choices",
+            "Selecting places and activities",
+            "Adding the best time and local food",
+            "Calculating the total trip cost",
+            "Formatting your complete itinerary",
+        ):
+            self.assertIn(stage, script)
+        self.assertIn("startGenerationProgress(false)", script)
+        self.assertIn("finishGenerationProgress(true)", script)
+
     def test_demo_payment_api_rejects_real_payment_credentials(self):
         self.register()
         response = self.client.post(
@@ -233,6 +249,7 @@ class AppTests(unittest.TestCase):
         listing = self.client.get("/api/trips").json()["trips"]
         self.assertEqual(len(listing), 1)
         self.assertEqual(listing[0]["id"], trip_id)
+        self.assertEqual(listing[0]["title"], "Japan trip")
         self.assertEqual(listing[0]["status"], "paused")
 
         detail = self.client.get(f"/api/trips/{trip_id}").json()["trip"]

@@ -3,6 +3,18 @@ let currentTripId = null;
 let latestAnswerMarkdown = "";
 let authMode = "login";
 let latestWorkspace = null;
+let generationTimer = null;
+let generationStepIndex = 0;
+
+const generationStages = [
+    "Understanding your trip request",
+    "Researching flight options",
+    "Comparing hotel choices",
+    "Selecting places and activities",
+    "Adding the best time and local food",
+    "Calculating the total trip cost",
+    "Formatting your complete itinerary"
+];
 
 const byId = (id) => document.getElementById(id);
 
@@ -28,6 +40,51 @@ function setBusy(isBusy, label = "Working...") {
     }
 }
 
+function paintGenerationSteps(activeIndex, complete = false) {
+    byId("generationSteps").innerHTML = generationStages.map((stage, index) => {
+        const state = complete || index < activeIndex
+            ? "complete"
+            : (index === activeIndex ? "active" : "pending");
+        const symbol = state === "complete" ? "✓" : (state === "active" ? "" : "○");
+        return `<li class="generation-step ${state}"><span aria-hidden="true">${symbol}</span><span>${stage}</span></li>`;
+    }).join("");
+}
+
+function startGenerationProgress(isRevision = false) {
+    window.clearInterval(generationTimer);
+    generationStepIndex = 0;
+    byId("generationTitle").textContent = isRevision
+        ? "Revising your trip"
+        : "Creating your trip";
+    byId("generationStatus").textContent = generationStages[0] + "…";
+    byId("generationProgress").classList.remove("hidden", "generation-failed");
+    paintGenerationSteps(0);
+
+    generationTimer = window.setInterval(() => {
+        if (generationStepIndex < generationStages.length - 1) {
+            generationStepIndex += 1;
+            byId("generationStatus").textContent = generationStages[generationStepIndex] + "…";
+            paintGenerationSteps(generationStepIndex);
+        }
+    }, 1600);
+}
+
+function finishGenerationProgress(success) {
+    window.clearInterval(generationTimer);
+    generationTimer = null;
+    const panel = byId("generationProgress");
+    if (success) {
+        paintGenerationSteps(generationStages.length, true);
+        byId("generationTitle").textContent = "Your trip plan is ready";
+        byId("generationStatus").textContent = "All sections have been prepared.";
+        window.setTimeout(() => panel.classList.add("hidden"), 900);
+        return;
+    }
+    panel.classList.add("generation-failed");
+    byId("generationTitle").textContent = "Trip generation stopped";
+    byId("generationStatus").textContent = "Review the error below and try again.";
+}
+
 function showError(message) {
     const errorBox = byId("errorBox");
     errorBox.textContent = message;
@@ -51,10 +108,21 @@ function apiErrorMessage(data, fallback) {
 function renderMarkdown(markdown) {
     const resultBox = byId("resultBox");
     if (typeof marked !== "undefined" && typeof DOMPurify !== "undefined") {
+        resultBox.classList.remove("plain-text-result");
         resultBox.innerHTML = DOMPurify.sanitize(marked.parse(markdown));
+        revealRenderedPlan(resultBox);
         return;
     }
+    resultBox.classList.add("plain-text-result");
     resultBox.textContent = markdown;
+}
+
+function revealRenderedPlan(container) {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    Array.from(container.children).forEach((element, index) => {
+        element.classList.add("plan-part-reveal");
+        element.style.animationDelay = `${Math.min(index * 55, 900)}ms`;
+    });
 }
 
 function stripStructuredPlanSection(markdown) {
@@ -70,9 +138,11 @@ function stripStructuredPlanSection(markdown) {
         .replace(/\|\s*true\s*\|/gi, "| Yes |")
         .replace(/\|\s*false\s*\|/gi, "| No |")
         .replace(
-            /^\s*\*\*(trip summary|flights|hotels|day-by-day itinerary|budget|practical notes)\*\*\s*$/gim,
-            "## $1"
+            /^[ \t]*(?:#{1,6}[ \t]*)?(?:\*{1,2})?(?:(?:10|[1-9])[.)][ \t]*)?(trip summary|flights|hotels|day[-\u2010-\u2015]by[-\u2010-\u2015]day[ \t]+itinerary|best places to visit|activities(?:[ \t]+and|[ \t]*&)[ \t]+experiences|best time to visit|local food|budget(?:[ \t]+and|[ \t]*&)[ \t]+total cost|budget|recommendations(?:[ \t]+and|[ \t]*&)[ \t]+practical notes|practical notes)(?:\*{1,2})?[ \t]*:?[ \t]*$/gim,
+            (_, heading) => `## ${heading.replace(/[\u2010-\u2015]/g, "-").replace(/\b\w/g, (letter) => letter.toUpperCase())}`
         )
+        .replace(/^[ \t]*[•·][ \t]+/gm, "- ")
+        .replace(/^[ \t]*(?:\*{1,2})?(day[ \t]+\d+\b[^\n]*?)(?:\*{1,2})?[ \t]*$/gim, "### $1")
         .replace(/\n\s*(?:---|\*\*\*|___)\s*$/g, "")
         .trimEnd();
     return readable || "# Travel plan\n\nA readable itinerary is not available yet.";
@@ -138,13 +208,16 @@ async function sendMessage() {
     }
 
     setBusy(true, "Generating draft");
+    startGenerationProgress(false);
     byId("approvalPanel").classList.add("hidden");
 
     try {
         const data = await requestJson("/api/travel", {message, thread_id: null});
+        finishGenerationProgress(true);
         renderWorkflowResult(data);
         await loadTrips();
     } catch (error) {
+        finishGenerationProgress(false);
         showError(error.message);
     } finally {
         setBusy(false);
@@ -166,15 +239,18 @@ async function submitApproval(action) {
     }
 
     setBusy(true, action === "revise" ? "Revising draft" : "Applying review");
+    if (action === "revise") startGenerationProgress(true);
     try {
         const data = await requestJson("/api/travel/approval", {
             thread_id: currentThreadId,
             action,
             feedback
         });
+        if (action === "revise") finishGenerationProgress(true);
         renderWorkflowResult(data);
         await loadTrips();
     } catch (error) {
+        if (action === "revise") finishGenerationProgress(false);
         showError(error.message);
     } finally {
         setBusy(false);
@@ -301,8 +377,7 @@ async function loadTrips() {
         }
         list.innerHTML = data.trips.map((trip) => `
             <button class="trip-card" onclick="openTrip('${trip.id}')">
-                <span><strong>${escapeHtml(trip.title)}</strong><small>${escapeHtml(trip.status)} · Version ${trip.current_version}</small></span>
-                <span class="open-label">Open →</span>
+                <strong>${escapeHtml(trip.title)}</strong>
             </button>
         `).join("");
     } catch (error) {
@@ -361,7 +436,7 @@ async function loadWorkspace() {
     try {
         const data = await requestJson(`/api/trips/${currentTripId}/workspace`, null, "GET");
         applyWorkspace(data.workspace);
-        byId("workspaceNotice").textContent = "Workspace ready.";
+        byId("workspaceNotice").textContent = "";
     } catch (error) {
         byId("tripWorkspace").classList.remove("hidden");
         Object.keys(workspaceLabels).forEach((action) => {
